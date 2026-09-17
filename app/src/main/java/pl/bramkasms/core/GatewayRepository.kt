@@ -2,12 +2,15 @@ package pl.bramkasms.core
 
 import android.database.sqlite.SQLiteConstraintException
 import pl.bramkasms.data.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.UUID
 
 class ValidationException(message: String) : IllegalArgumentException(message)
 class DuplicateExternalIdException : IllegalStateException("externalId już istnieje")
 
 class GatewayRepository(private val dao: GatewayDao) {
+    private val enqueueMutex = Mutex()
     suspend fun enqueue(
         recipientInput: String,
         content: String,
@@ -16,9 +19,9 @@ class GatewayRepository(private val dao: GatewayDao) {
         removePolish: Boolean,
         source: MessageSource,
         apiKeyName: String?
-    ): Pair<MessageEntity, Boolean> {
+    ): Pair<MessageEntity, Boolean> = enqueueMutex.withLock {
         val key = idempotencyKey?.trim()?.takeIf { it.isNotEmpty() }
-        if (key != null) dao.byIdempotencyKey(key)?.let { return it to false }
+        if (key != null) dao.byIdempotencyKey(key)?.let { return@withLock it to false }
         val recipient = PhoneNumber.normalize(recipientInput) ?: throw ValidationException("Nieprawidłowy numer telefonu")
         val original = content.trim()
         if (original.isEmpty()) throw ValidationException("Treść nie może być pusta")
@@ -34,11 +37,11 @@ class GatewayRepository(private val dao: GatewayDao) {
         try {
             dao.insertMessage(message)
         } catch (e: SQLiteConstraintException) {
-            if (key != null) dao.byIdempotencyKey(key)?.let { return it to false }
+            if (key != null) dao.byIdempotencyKey(key)?.let { return@withLock it to false }
             throw e
         }
         audit("MESSAGE_QUEUED", "id=${message.id}; source=$source")
-        return message to true
+        message to true
     }
 
     suspend fun cancel(id: String): Boolean {
@@ -51,9 +54,17 @@ class GatewayRepository(private val dao: GatewayDao) {
 
     suspend fun retry(id: String): Boolean {
         val message = dao.message(id) ?: return false
-        if (message.status != MessageStatus.FAILED) throw IllegalStateException("Ponowić można tylko wiadomość błędną")
-        dao.setStatus(id, MessageStatus.QUEUED, System.currentTimeMillis())
+        if (message.status !in setOf(MessageStatus.FAILED, MessageStatus.UNKNOWN)) throw IllegalStateException("Ponowić można tylko wiadomość błędną lub o nieznanym wyniku")
+        dao.manualRetry(id, System.currentTimeMillis(), if (message.status == MessageStatus.UNKNOWN) "Ręczne ponowienie po nieznanym wyniku" else null)
         audit("MESSAGE_REQUEUED", "id=$id")
+        return true
+    }
+
+    suspend fun resolveUnknownAsSent(id: String): Boolean {
+        val message = dao.message(id) ?: return false
+        if (message.status != MessageStatus.UNKNOWN) throw IllegalStateException("Tylko wiadomość o nieznanym wyniku można oznaczyć jako wysłaną")
+        dao.resolveUnknownAsSent(id, System.currentTimeMillis(), "Ręcznie oznaczono jako wysłaną")
+        audit("MESSAGE_RESOLVED_AS_SENT", "id=$id")
         return true
     }
 

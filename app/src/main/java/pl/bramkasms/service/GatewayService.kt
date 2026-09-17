@@ -3,18 +3,15 @@ package pl.bramkasms.service
 import android.app.*
 import android.content.Context
 import android.content.Intent
-import android.net.wifi.WifiManager
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collectLatest
 import pl.bramkasms.MainActivity
-import pl.bramkasms.R
 import pl.bramkasms.SmsGatewayApp
 import pl.bramkasms.data.SettingsEntity
+import pl.bramkasms.network.NetworkAccess
 import pl.bramkasms.server.GatewayServer
-import java.net.Inet4Address
-import java.net.NetworkInterface
 
 class GatewayService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -26,24 +23,39 @@ class GatewayService : Service() {
         val app = application as SmsGatewayApp
         val dao = app.database.dao()
         createChannel()
-        startForeground(NOTIFICATION_ID, notification(0, 8080))
+        GatewayRuntime.update(ServiceSnapshot(ServicePhase.STARTING))
+        startForeground(NOTIFICATION_ID, notification("Bramka SMS uruchamia się", 0, 8080))
         scope.launch(Dispatchers.IO) {
             val settings = dao.settings() ?: SettingsEntity().also { dao.saveSettings(it) }
-            server = GatewayServer(this@GatewayService, dao, app.repository).also { it.start(settings.port) }
-            app.repository.audit("SERVICE_STARTED", "port=${settings.port}")
+            GatewayRuntime.update(ServiceSnapshot(ServicePhase.STARTING, localAddress(this@GatewayService), settings.port))
+            try {
+                server = GatewayServer(this@GatewayService, dao, app.repository).also { it.start(settings.port) }
+                queue = QueueProcessor(dao, app.repository, SmsSender(this@GatewayService)).also { it.start(scope) }
+                dao.saveSettings(settings.copy(lastServiceError = null))
+                GatewayRuntime.update(ServiceSnapshot(ServicePhase.RUNNING, localAddress(this@GatewayService), settings.port))
+                getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification("Bramka SMS działa", dao.queuedCountNow(), settings.port))
+                app.repository.audit("SERVICE_STARTED", "port=${settings.port}")
+            } catch (t: Throwable) {
+                val error = (t.message ?: t.javaClass.simpleName).take(500)
+                dao.saveSettings(settings.copy(lastServiceError = error))
+                app.repository.audit("SERVICE_START_FAILED", "port=${settings.port}; error=$error")
+                GatewayRuntime.update(ServiceSnapshot(ServicePhase.ERROR, localAddress(this@GatewayService), settings.port, error))
+                getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification("Błąd bramki SMS", 0, settings.port, error))
+            }
         }
-        queue = QueueProcessor(dao, app.repository, SmsSender(this)).also { it.start(scope) }
         scope.launch {
             dao.queuedCount().collectLatest { count ->
                 val port = dao.settings()?.port ?: 8080
-                getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(count, port))
+                if (GatewayRuntime.state.value.phase == ServicePhase.RUNNING)
+                    getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification("Bramka SMS działa", count, port))
             }
         }
     }
 
     override fun onDestroy() {
-        queue.stop()
+        if (::queue.isInitialized) queue.stop()
         if (::server.isInitialized) server.stop()
+        GatewayRuntime.update(ServiceSnapshot(ServicePhase.STOPPED))
         scope.cancel()
         super.onDestroy()
     }
@@ -52,13 +64,13 @@ class GatewayService : Service() {
     private fun createChannel() {
         getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(CHANNEL, "Bramka SMS", NotificationManager.IMPORTANCE_LOW))
     }
-    private fun notification(queued: Int, port: Int): Notification {
+    private fun notification(title: String, queued: Int, port: Int, error: String? = null): Notification {
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        val address = localAddress()?.let { "$it:$port" } ?: "brak Wi‑Fi"
+        val address = localAddress(this)?.let { "$it:$port" } ?: "brak adresu Wi‑Fi"
         return NotificationCompat.Builder(this, CHANNEL)
             .setSmallIcon(android.R.drawable.stat_notify_chat)
-            .setContentTitle("Bramka SMS działa")
-            .setContentText("Adres: $address • W kolejce: $queued")
+            .setContentTitle(title)
+            .setContentText(error ?: "Adres: $address • W kolejce: $queued")
             .setOngoing(true).setContentIntent(open).build()
     }
 
@@ -66,8 +78,7 @@ class GatewayService : Service() {
         const val CHANNEL = "gateway_service"
         const val NOTIFICATION_ID = 1001
         fun start(context: Context) = context.startForegroundService(Intent(context, GatewayService::class.java))
-        fun stop(context: Context) = context.stopService(Intent(context, GatewayService::class.java))
-        fun localAddress(): String? = NetworkInterface.getNetworkInterfaces()?.toList()?.flatMap { it.inetAddresses.toList() }
-            ?.firstOrNull { !it.isLoopbackAddress && it is Inet4Address && it.isSiteLocalAddress }?.hostAddress
+        fun stop(context: Context) { context.stopService(Intent(context, GatewayService::class.java)); GatewayRuntime.update(ServiceSnapshot(ServicePhase.STOPPED)) }
+        fun localAddress(context: Context): String? = NetworkAccess.wifiIpv4Address(context)
     }
 }

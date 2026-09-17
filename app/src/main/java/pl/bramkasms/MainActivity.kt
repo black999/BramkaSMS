@@ -27,6 +27,8 @@ import pl.bramkasms.data.AdminUserEntity
 import pl.bramkasms.data.SettingsEntity
 import pl.bramkasms.security.Security
 import pl.bramkasms.service.GatewayService
+import pl.bramkasms.service.GatewayRuntime
+import pl.bramkasms.service.ServicePhase
 import pl.bramkasms.service.SmsSender
 import java.util.UUID
 
@@ -45,12 +47,12 @@ class MainActivity : ComponentActivity() {
 @Composable private fun GatewayScreen(app: SmsGatewayApp) {
     val scope = rememberCoroutineScope()
     var hasAdmin by remember { mutableStateOf<Boolean?>(null) }
-    var running by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    val service by GatewayRuntime.state.collectAsStateWithLifecycle()
     val settings by app.database.dao().settingsFlow().collectAsStateWithLifecycle(initialValue = null)
     val queued by app.database.dao().queuedCount().collectAsStateWithLifecycle(initialValue = 0)
     val permissions = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
-        if (result[Manifest.permission.SEND_SMS] == true) { GatewayService.start(app); running = true } else error = "Uprawnienie do wysyłania SMS jest wymagane."
+        if (result[Manifest.permission.SEND_SMS] == true) GatewayService.start(app) else error = "Uprawnienie do wysyłania SMS jest wymagane."
     }
     LaunchedEffect(Unit) { hasAdmin = withContext(Dispatchers.IO) { app.database.dao().userCount() > 0 } }
     if (hasAdmin == false) {
@@ -65,22 +67,24 @@ class MainActivity : ComponentActivity() {
         return
     }
     Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        val displayPort = if (service.phase == ServicePhase.STOPPED) settings?.port ?: service.port else service.port
         Text("Bramka SMS", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-        Text(if (running) "USŁUGA DZIAŁA" else "USŁUGA ZATRZYMANA", color = if (running) Color(0xFF087F5B) else Color(0xFFB42318), fontWeight = FontWeight.Bold)
+        val stateLabel = when (service.phase) { ServicePhase.RUNNING -> "USŁUGA DZIAŁA"; ServicePhase.STARTING -> "URUCHAMIANIE"; ServicePhase.ERROR -> "BŁĄD URUCHOMIENIA"; ServicePhase.STOPPED -> "USŁUGA ZATRZYMANA" }
+        Text(stateLabel, color = if (service.phase == ServicePhase.RUNNING) Color(0xFF087F5B) else Color(0xFFB42318), fontWeight = FontWeight.Bold)
         Card(shape = RoundedCornerShape(18.dp)) {
             Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Info("Adres panelu", "http://${GatewayService.localAddress() ?: "brak-Wi-Fi"}:${settings?.port ?: 8080}")
+                Info("Adres panelu", "http://${service.address ?: GatewayService.localAddress(app) ?: "brak-Wi-Fi"}:$displayPort")
                 Info("Karta SIM", SmsSender(app).readinessError() ?: "Gotowa")
                 Info("W kolejce", queued.toString())
-                error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                (service.error ?: settings?.lastServiceError ?: error)?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Button(onClick = {
                 val requested = buildList { add(Manifest.permission.SEND_SMS); add(Manifest.permission.READ_PHONE_STATE); if (android.os.Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS) }
                 permissions.launch(requested.toTypedArray())
-            }, enabled = !running) { Text("Uruchom") }
-            OutlinedButton(onClick = { GatewayService.stop(app); running = false }, enabled = running) { Text("Zatrzymaj") }
+            }, enabled = service.phase == ServicePhase.STOPPED || service.phase == ServicePhase.ERROR) { Text("Uruchom") }
+            OutlinedButton(onClick = { GatewayService.stop(app) }, enabled = service.phase == ServicePhase.RUNNING || service.phase == ServicePhase.STARTING) { Text("Zatrzymaj") }
         }
         OutlinedButton(onClick = { app.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }) { Text("Ustawienia baterii") }
         Text("Panel działa wyłącznie w sieci lokalnej. Ustaw rezerwację DHCP dla telefonu.", style = MaterialTheme.typography.bodySmall)

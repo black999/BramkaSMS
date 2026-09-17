@@ -11,10 +11,12 @@ interface GatewayDao {
     @Query("SELECT * FROM messages ORDER BY createdAt DESC LIMIT :limit OFFSET :offset") suspend fun messages(limit: Int, offset: Int): List<MessageEntity>
     @Query("SELECT * FROM messages WHERE status = :status ORDER BY createdAt ASC LIMIT 1") suspend fun firstByStatus(status: MessageStatus): MessageEntity?
     @Query("UPDATE messages SET status = :status, updatedAt = :now, error = :error WHERE id = :id") suspend fun setStatus(id: String, status: MessageStatus, now: Long, error: String? = null): Int
-    @Query("UPDATE messages SET status = 'SENDING', attemptCount = attemptCount + 1, updatedAt = :now WHERE id = :id AND status = 'QUEUED'") suspend fun claim(id: String, now: Long): Int
+    @Query("UPDATE messages SET status = 'SENDING', attemptCount = attemptCount + 1, automaticRetryCount = automaticRetryCount + 1, updatedAt = :now WHERE id = :id AND status = 'QUEUED'") suspend fun claim(id: String, now: Long): Int
     @Query("UPDATE messages SET status = 'SENT', sentAt = :now, updatedAt = :now, error = NULL WHERE id = :id") suspend fun markSent(id: String, now: Long)
     @Query("UPDATE messages SET status = 'FAILED', updatedAt = :now, error = :error WHERE id = :id") suspend fun markFailed(id: String, now: Long, error: String)
-    @Query("UPDATE messages SET status = 'QUEUED', updatedAt = :now, error = :reason WHERE status = 'SENDING'") suspend fun recoverSending(now: Long, reason: String): Int
+    @Query("UPDATE messages SET status = 'UNKNOWN', updatedAt = :now, error = :reason WHERE status = 'SENDING'") suspend fun recoverSending(now: Long, reason: String): Int
+    @Query("UPDATE messages SET status = 'QUEUED', automaticRetryCount = 0, updatedAt = :now, error = :reason WHERE id = :id AND status IN ('FAILED', 'UNKNOWN')") suspend fun manualRetry(id: String, now: Long, reason: String? = null): Int
+    @Query("UPDATE messages SET status = 'SENT', sentAt = :now, updatedAt = :now, error = :reason WHERE id = :id AND status = 'UNKNOWN'") suspend fun resolveUnknownAsSent(id: String, now: Long, reason: String): Int
     @Query("SELECT COUNT(*) FROM messages WHERE status = 'QUEUED'") fun queuedCount(): Flow<Int>
     @Query("SELECT COUNT(*) FROM messages WHERE status = 'QUEUED'") suspend fun queuedCountNow(): Int
     @Query("SELECT COUNT(*) FROM messages WHERE status = :status") suspend fun count(status: MessageStatus): Int
@@ -23,6 +25,7 @@ interface GatewayDao {
     @Insert suspend fun insertAudit(event: AuditLogEntity)
 
     @Query("SELECT * FROM api_keys WHERE enabled = 1") suspend fun activeApiKeys(): List<ApiKeyEntity>
+    @Query("SELECT * FROM api_keys WHERE hash = :hash AND enabled = 1 LIMIT 1") suspend fun activeApiKeyByHash(hash: String): ApiKeyEntity?
     @Query("SELECT * FROM api_keys ORDER BY createdAt DESC") suspend fun apiKeys(): List<ApiKeyEntity>
     @Insert suspend fun insertApiKey(key: ApiKeyEntity)
     @Query("UPDATE api_keys SET lastUsedAt = :now WHERE id = :id") suspend fun touchApiKey(id: String, now: Long)

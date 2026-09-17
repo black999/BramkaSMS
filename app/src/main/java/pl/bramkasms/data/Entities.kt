@@ -4,7 +4,7 @@ import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
 
-enum class MessageStatus { QUEUED, SENDING, SENT, DELIVERED, FAILED, CANCELLED }
+enum class MessageStatus { QUEUED, SENDING, SENT, DELIVERED, FAILED, UNKNOWN, CANCELLED }
 enum class MessageSource { WEB, API }
 
 @Entity(tableName = "messages", indices = [Index("externalId"), Index(value = ["idempotencyKey"], unique = true), Index("status")])
@@ -20,6 +20,7 @@ data class MessageEntity(
     val status: MessageStatus,
     val parts: Int,
     val attemptCount: Int = 0,
+    val automaticRetryCount: Int = 0,
     val error: String? = null,
     val createdAt: Long,
     val updatedAt: Long,
@@ -63,7 +64,10 @@ data class SettingsEntity(
     val maxRetries: Int = 3,
     val removePolishByDefault: Boolean = true,
     val queuePaused: Boolean = false,
-    val allowedSubnetPrefix: String = ""
+    val allowedSubnetPrefix: String = "",
+    val sendingTimeoutMs: Long = 60_000,
+    val startAfterBoot: Boolean = false,
+    val lastServiceError: String? = null
 )
 
 @Entity(tableName = "audit_log", indices = [Index("createdAt")])

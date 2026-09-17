@@ -30,6 +30,8 @@ android {
     }
 }
 
+ksp { arg("room.schemaLocation", "$projectDir/schemas") }
+
 dependencies {
     val room = "2.7.2"
     val ktor = "3.1.3"

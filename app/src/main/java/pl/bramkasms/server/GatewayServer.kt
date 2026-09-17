@@ -15,6 +15,8 @@ import kotlinx.serialization.json.Json
 import pl.bramkasms.core.*
 import pl.bramkasms.data.*
 import pl.bramkasms.security.Security
+import pl.bramkasms.network.CidrBlock
+import pl.bramkasms.network.NetworkAccess
 import pl.bramkasms.service.SmsSender
 import java.time.Instant
 import java.util.UUID
@@ -24,9 +26,17 @@ class GatewayServer(private val context: Context, private val dao: GatewayDao, p
     private var engine: EmbeddedServer<*, *>? = null
     private val loginAttempts = ConcurrentHashMap<String, MutableList<Long>>()
 
-    fun start(port: Int) {
+    suspend fun start(port: Int) {
         if (engine != null) return
-        engine = embeddedServer(CIO, host = "0.0.0.0", port = port) { module() }.start(wait = false)
+        val created = embeddedServer(CIO, host = "0.0.0.0", port = port) { module() }
+        try {
+            created.startSuspend(wait = false)
+            created.engine.resolvedConnectors()
+            engine = created
+        } catch (t: Throwable) {
+            runCatching { created.stop(0, 1_000) }
+            throw t
+        }
     }
     fun stop() { engine?.stop(1_000, 3_000); engine = null }
 
@@ -36,8 +46,16 @@ class GatewayServer(private val context: Context, private val dao: GatewayDao, p
             exception<ValidationException> { call, cause -> call.respond(HttpStatusCode.BadRequest, ErrorResponse(cause.message ?: "Błędne dane")) }
             exception<ContentTransformationException> { call, _ -> call.respond(HttpStatusCode.BadRequest, ErrorResponse("Nieprawidłowe dane JSON")) }
             exception<Throwable> { call, cause ->
-                repository.audit("HTTP_ERROR", cause.javaClass.simpleName + ": " + (cause.message ?: ""), call.request.local.remoteAddress)
+                repository.audit("HTTP_ERROR", "type=${cause.javaClass.simpleName}", call.request.local.remoteAddress)
                 call.respond(HttpStatusCode.InternalServerError, ErrorResponse("Wewnętrzny błąd usługi"))
+            }
+        }
+        intercept(ApplicationCallPipeline.Plugins) {
+            val configured = (dao.settings() ?: SettingsEntity()).allowedSubnetPrefix
+            if (!NetworkAccess.isAllowed(call.request.local.remoteAddress, configured)) {
+                repository.audit("NETWORK_ACCESS_DENIED", "remote=${call.request.local.remoteAddress}")
+                call.respond(HttpStatusCode.Forbidden, ErrorResponse("Adres spoza dozwolonej podsieci"))
+                finish()
             }
         }
         routing {
@@ -61,7 +79,8 @@ class GatewayServer(private val context: Context, private val dao: GatewayDao, p
                     val actor = principal(call) ?: return@post unauthorized(call)
                     if (!actor.allowedForWrite(call)) return@post
                     val request = call.receive<MessageRequest>()
-                    val (message, created) = repository.enqueue(request.recipient, request.content, request.externalId, call.request.headers["Idempotency-Key"], request.removePolishCharacters, actor.source, actor.apiKeyName)
+                    val removePolish = request.removePolishCharacters ?: (dao.settings() ?: SettingsEntity()).removePolishByDefault
+                    val (message, created) = repository.enqueue(request.recipient, request.content, request.externalId, call.request.headers["Idempotency-Key"], removePolish, actor.source, actor.apiKeyName)
                     call.respond(if (created) HttpStatusCode.Created else HttpStatusCode.OK, message.response())
                 }
                 get("/messages/{id}") {
@@ -91,6 +110,14 @@ class GatewayServer(private val context: Context, private val dao: GatewayDao, p
                         if (!repository.retry(id)) call.respond(HttpStatusCode.NotFound, ErrorResponse("Nie znaleziono wiadomości")) else call.respond(dao.message(id)!!.response())
                     } catch (e: IllegalStateException) { call.respond(HttpStatusCode.Conflict, ErrorResponse(e.message.orEmpty())) }
                 }
+                post("/messages/{id}/mark-sent") {
+                    val actor = principal(call) ?: return@post unauthorized(call)
+                    if (!actor.allowedForWrite(call)) return@post
+                    val id = call.parameters["id"].orEmpty()
+                    try {
+                        if (!repository.resolveUnknownAsSent(id)) call.respond(HttpStatusCode.NotFound, ErrorResponse("Nie znaleziono wiadomości")) else call.respond(dao.message(id)!!.response())
+                    } catch (e: IllegalStateException) { call.respond(HttpStatusCode.Conflict, ErrorResponse(e.message.orEmpty())) }
+                }
                 post("/queue/{action}") {
                     val actor = principal(call) ?: return@post unauthorized(call)
                     if (!actor.allowedForWrite(call)) return@post
@@ -107,12 +134,12 @@ class GatewayServer(private val context: Context, private val dao: GatewayDao, p
                 put("/settings") {
                     if (panelPrincipal(call) == null || !csrfValid(call)) return@put forbidden(call)
                     val req = call.receive<SettingsRequest>()
-                    if (req.port !in 1024..65535 || req.delayMs !in 0..3_600_000 || req.maxRetries !in 1..20)
+                    if (req.port !in 1024..65535 || req.delayMs !in 0..3_600_000 || req.maxRetries !in 0..20 || req.sendingTimeoutMs !in 5_000..300_000 || (req.allowedSubnetCidr.isNotBlank() && req.allowedSubnetCidr.split(',', ';').any { CidrBlock.parse(it) == null }))
                         return@put call.respond(HttpStatusCode.BadRequest, ErrorResponse("Nieprawidłowe ustawienia"))
                     val old = dao.settings() ?: SettingsEntity()
-                    val updated = old.copy(port = req.port, delayMs = req.delayMs, maxRetries = req.maxRetries, removePolishByDefault = req.removePolishByDefault, allowedSubnetPrefix = req.allowedSubnetPrefix.trim())
+                    val updated = old.copy(port = req.port, delayMs = req.delayMs, maxRetries = req.maxRetries, removePolishByDefault = req.removePolishByDefault, allowedSubnetPrefix = req.allowedSubnetCidr.trim(), sendingTimeoutMs = req.sendingTimeoutMs, startAfterBoot = req.startAfterBoot)
                     dao.saveSettings(updated); repository.audit("SETTINGS_CHANGED", "port=${updated.port}; delayMs=${updated.delayMs}; maxRetries=${updated.maxRetries}")
-                    call.respond(updated.response())
+                    call.respond(updated.response(restartRequired = old.port != updated.port))
                 }
                 get("/api-keys") {
                     if (panelPrincipal(call) == null) return@get unauthorized(call)
@@ -123,7 +150,7 @@ class GatewayServer(private val context: Context, private val dao: GatewayDao, p
                     val req = call.receive<ApiKeyRequest>()
                     if (req.name.isBlank()) return@post call.respond(HttpStatusCode.BadRequest, ErrorResponse("Nazwa jest wymagana"))
                     val raw = "bms_${Security.token()}"
-                    val entity = ApiKeyEntity(UUID.randomUUID().toString(), req.name.trim(), raw.take(12), Security.passwordHash(raw), true, System.currentTimeMillis())
+                    val entity = ApiKeyEntity(UUID.randomUUID().toString(), req.name.trim(), raw.take(12), Security.sha256(raw), true, System.currentTimeMillis())
                     dao.insertApiKey(entity)
                     repository.audit("API_KEY_CREATED", "id=${entity.id}; name=${entity.name}")
                     call.respond(HttpStatusCode.Created, ApiKeyCreatedResponse(entity.id, entity.name, raw))
@@ -133,6 +160,14 @@ class GatewayServer(private val context: Context, private val dao: GatewayDao, p
                     val id = call.parameters["id"].orEmpty()
                     if (dao.deleteApiKey(id) == 0) call.respond(HttpStatusCode.NotFound, ErrorResponse("Nie znaleziono klucza")) else {
                         repository.audit("API_KEY_DELETED", "id=$id"); call.respond(HttpStatusCode.NoContent)
+                    }
+                }
+                post("/api-keys/{id}/{action}") {
+                    if (panelPrincipal(call) == null || !csrfValid(call)) return@post forbidden(call)
+                    val id = call.parameters["id"].orEmpty()
+                    val enabled = when (call.parameters["action"]) { "enable" -> true; "disable" -> false; else -> return@post call.respond(HttpStatusCode.NotFound) }
+                    if (dao.setApiKeyEnabled(id, enabled) == 0) call.respond(HttpStatusCode.NotFound, ErrorResponse("Nie znaleziono klucza")) else {
+                        repository.audit(if (enabled) "API_KEY_ENABLED" else "API_KEY_DISABLED", "id=$id"); call.respond(HttpStatusCode.NoContent)
                     }
                 }
             }
@@ -151,9 +186,7 @@ class GatewayServer(private val context: Context, private val dao: GatewayDao, p
     private suspend fun principal(call: ApplicationCall): Actor? {
         panelPrincipal(call)?.let { return Actor(MessageSource.WEB, session = it) }
         val bearer = call.request.headers[HttpHeaders.Authorization]?.removePrefix("Bearer ")?.takeIf { it.isNotBlank() } ?: return null
-        val key = dao.activeApiKeys().firstOrNull { Security.passwordMatches(bearer, it.hash) } ?: return null
-        val prefix = (dao.settings() ?: SettingsEntity()).allowedSubnetPrefix
-        if (prefix.isNotBlank() && !call.request.local.remoteAddress.startsWith(prefix)) return null
+        val key = dao.activeApiKeyByHash(Security.sha256(bearer)) ?: return null
         dao.touchApiKey(key.id, System.currentTimeMillis())
         return Actor(MessageSource.API, key.name)
     }
