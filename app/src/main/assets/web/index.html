@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="pl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bramka SMS</title><link rel="stylesheet" href="/app.css"></head>
+<body>
+<main id="login" class="login"><form id="login-form" class="card auth"><div class="brand">B</div><h1>Bramka SMS</h1><p>Zaloguj się do lokalnego panelu.</p><label>Użytkownik<input name="username" autocomplete="username" required></label><label>Hasło<input name="password" type="password" autocomplete="current-password" required></label><button>Zaloguj</button><p id="login-error" class="error"></p></form></main>
+<div id="app" hidden>
+  <aside><div class="logo"><span>B</span><strong>Bramka SMS</strong></div><nav><button data-view="dashboard" class="active">Pulpit</button><button data-view="new">Nowy SMS</button><button data-view="history">Historia</button><button data-view="settings">Ustawienia</button></nav><button id="logout" class="ghost">Wyloguj</button></aside>
+  <main class="content">
+    <header><div><small>LOKALNA USŁUGA</small><h1 id="title">Pulpit</h1></div><span id="live" class="pill">● Sprawdzanie</span></header>
+    <section id="dashboard" class="view">
+      <div class="stats"><article class="card"><small>STATUS</small><b id="service">—</b></article><article class="card"><small>KARTA SIM</small><b id="sim">—</b></article><article class="card"><small>W KOLEJCE</small><b id="queued">0</b></article><article class="card"><small>BŁĘDNE</small><b id="failed">0</b></article></div>
+      <article class="card wide"><div><h2>Kolejka wiadomości</h2><p id="queue-state">Pobieranie stanu…</p></div><button id="queue-toggle" class="secondary">Zatrzymaj kolejkę</button></article>
+    </section>
+    <section id="new" class="view" hidden><form id="sms-form" class="card form"><h2>Nowa wiadomość</h2><label>Numer odbiorcy<input name="recipient" placeholder="+48500100200" required></label><label>Treść<textarea name="content" rows="7" maxlength="1000" required></textarea><span id="counter" class="hint">0 znaków • 0 części</span></label><label>Identyfikator zewnętrzny (opcjonalny)<input name="externalId"></label><label class="check"><input name="removePolishCharacters" type="checkbox" checked> Usuń polskie znaki przed wysłaniem</label><button>Dodaj do kolejki</button><p id="sms-result"></p></form></section>
+    <section id="history" class="view" hidden><article class="card table-card"><div class="table-head"><h2>Historia</h2><button id="refresh" class="secondary">Odśwież</button></div><div class="table-wrap"><table><thead><tr><th>Data UTC</th><th>Numer</th><th>Treść</th><th>Źródło</th><th>Status</th><th></th></tr></thead><tbody id="messages"></tbody></table></div></article></section>
+    <section id="settings" class="view" hidden><div class="grid"><form id="settings-form" class="card form"><h2>Parametry usługi</h2><label>Port<input name="port" type="number" min="1024" max="65535"></label><label>Przerwa między SMS (ms)<input name="delayMs" type="number" min="0"></label><label>Liczba prób<input name="maxRetries" type="number" min="1" max="20"></label><label>Dozwolony prefiks IP<input name="allowedSubnetPrefix" placeholder="np. 192.168.1."></label><label class="check"><input name="removePolishByDefault" type="checkbox"> Domyślnie usuń polskie znaki</label><button>Zapisz</button><p class="hint">Zmiana portu wymaga ponownego uruchomienia usługi.</p></form><article class="card form"><h2>Klucze API</h2><form id="key-form" class="inline"><input name="name" placeholder="Nazwa integracji" required><button>Utwórz</button></form><div id="new-key" class="secret" hidden></div><div id="keys"></div></article></div></section>
+  </main>
+</div><div id="toast"></div><script src="/app.js"></script></body></html>
