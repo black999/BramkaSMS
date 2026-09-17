@@ -40,7 +40,8 @@ class GatewayService : Service() {
                 dao.saveSettings(settings.copy(lastServiceError = error))
                 app.repository.audit("SERVICE_START_FAILED", "port=${settings.port}; error=$error")
                 GatewayRuntime.update(ServiceSnapshot(ServicePhase.ERROR, localAddress(this@GatewayService), settings.port, error))
-                getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification("Błąd bramki SMS", 0, settings.port, error))
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
             }
         }
         scope.launch {
@@ -59,6 +60,7 @@ class GatewayService : Service() {
         scope.cancel()
         super.onDestroy()
     }
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun createChannel() {
